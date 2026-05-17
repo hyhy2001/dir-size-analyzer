@@ -1,0 +1,14 @@
+[package]
+name = "fast_scanner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fast_scanner"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }
+walkdir = "2.5"
+ignore = "0.4.22"
+dashmap = "5"
