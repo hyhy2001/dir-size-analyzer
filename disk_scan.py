@@ -25,6 +25,8 @@ def _load_local_fast_scanner() -> object | None:
     script_dir = Path(__file__).resolve().parent
     local_so = script_dir / "fast_scanner.abi3.so"
     if not local_so.exists():
+        local_so = script_dir / "lib" / "fast_scanner.abi3.so"
+    if not local_so.exists():
         return None
 
     try:

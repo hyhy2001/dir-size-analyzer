@@ -13,7 +13,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="$SCRIPT_DIR/.."
+OUT_DIR="$SCRIPT_DIR/../lib"
 LIB_NAME="fast_scanner"
 GLIBC_VER="${1:-2.17}"
 
@@ -31,10 +31,10 @@ fi
 RELEASE_SO="target/x86_64-unknown-linux-gnu/release/lib${LIB_NAME}.so"
 
 strip "$RELEASE_SO"
+mkdir -p "$OUT_DIR"
 cp "$RELEASE_SO" "$OUT_DIR/${LIB_NAME}.abi3.so"
 rm -rf target build
 
 echo ""
 echo "==> Done. glibc requirements:"
 objdump -p "$OUT_DIR/${LIB_NAME}.abi3.so" | grep GLIBC | sort -V
-
