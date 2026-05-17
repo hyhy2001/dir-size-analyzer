@@ -2,8 +2,8 @@
 # Usage:
 #   ./run_dir_scan.csh --workers 64
 #
-# config.list: danh sách path python3 (mỗi dòng 1 path)
-# Script lấy path đầu tiên TỒN TẠI trong config.list và chạy:
+# config.list: list of python3 paths (one path per line).
+# The script picks the first existing path in config.list and runs:
 #   bs -os RHEL8 -M 10000 <python_path> disk_scan.py --workers <N>
 
 set workers = 64
