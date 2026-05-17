@@ -112,6 +112,10 @@ fn scan_dir_info(path: String, max_workers: Option<usize>) -> PyResult<(u64, u64
                             return WalkState::Continue;
                         }
                     }
+                    if meta.nlink() <= 1 {
+                        tb.fetch_add(meta.blocks().saturating_mul(512), Ordering::Relaxed);
+                        return WalkState::Continue;
+                    }
 
                     let key = (meta.dev(), meta.ino());
                     if si.insert(key) {
