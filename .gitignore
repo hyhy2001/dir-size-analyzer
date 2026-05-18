@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local runtime/output folders
+INFO/
+SETTING/
+
+# Local examples/reference files not for commit
+samples/
+input_example
+output_example
+perl_scan.pl
+
+# Rust build artifacts
+rust_scanner/target/
+rust_scanner/build/
+
+# Virtual envs / editor
+.venv/
+.vscode/
+.idea/

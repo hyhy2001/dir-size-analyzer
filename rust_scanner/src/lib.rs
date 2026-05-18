@@ -143,6 +143,60 @@ fn is_parent_or_same(parent: &Path, child: &Path) -> bool {
     child.starts_with(parent)
 }
 
+#[derive(Clone)]
+struct GroupJob {
+    root: PathBuf,
+    indexes: Vec<usize>,
+    weight: u64,
+    threads: usize,
+}
+
+fn estimate_path_weight(path: &Path, group_size: usize) -> u64 {
+    const MAX_SAMPLE_ENTRIES: usize = 4096;
+    let mut weight = (group_size as u64).saturating_mul(1_000_000);
+
+    if let Ok(meta) = fs::metadata(path) {
+        weight = weight.saturating_add(meta.blocks().saturating_mul(512));
+    }
+
+    let read_dir = match fs::read_dir(path) {
+        Ok(iter) => iter,
+        Err(_) => return weight,
+    };
+
+    let mut sampled = 0usize;
+    let mut dir_count = 0u64;
+    let mut file_count = 0u64;
+    for entry_res in read_dir {
+        if sampled >= MAX_SAMPLE_ENTRIES {
+            break;
+        }
+        sampled += 1;
+
+        let entry = match entry_res {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if ft.is_dir() {
+            dir_count = dir_count.saturating_add(1);
+        } else if ft.is_file() {
+            file_count = file_count.saturating_add(1);
+        }
+    }
+
+    let fanout_score = dir_count
+        .saturating_mul(200_000)
+        .saturating_add(file_count.saturating_mul(20_000));
+
+    weight.saturating_add(fanout_score)
+}
+
 fn scan_group_paths_impl(
     root: &Path,
     targets: &[PathBuf],
@@ -349,10 +403,50 @@ fn scan_multi_dir_info(
 
     let total_workers = max_workers.unwrap_or(default_workers()).max(1);
     let worker_count = total_workers.min(groups.len()).max(1);
-    let per_group_threads = (total_workers / worker_count).max(1);
 
-    let queue: Arc<Mutex<VecDeque<(PathBuf, Vec<usize>)>>> = Arc::new(Mutex::new(
-        groups.into_iter().collect::<VecDeque<_>>(),
+    let mut jobs = groups
+        .into_iter()
+        .map(|(root, indexes)| GroupJob {
+            weight: estimate_path_weight(&root, indexes.len()),
+            root,
+            indexes,
+            threads: 1,
+        })
+        .collect::<Vec<_>>();
+
+    jobs.sort_by(|a, b| b.weight.cmp(&a.weight));
+
+    let thread_budget = total_workers.saturating_sub(jobs.len());
+    if thread_budget > 0 {
+        let total_weight = jobs.iter().map(|job| job.weight.max(1)).sum::<u64>().max(1);
+        let mut extra_alloc = vec![0usize; jobs.len()];
+        let mut assigned = 0usize;
+
+        for (idx, job) in jobs.iter().enumerate() {
+            let proportional = (thread_budget as u128)
+                .saturating_mul(job.weight.max(1) as u128)
+                / (total_weight as u128);
+            let add = usize::try_from(proportional).unwrap_or(0);
+            extra_alloc[idx] = add;
+            assigned = assigned.saturating_add(add);
+        }
+
+        let mut remain = thread_budget.saturating_sub(assigned);
+        for idx in 0..jobs.len() {
+            if remain == 0 {
+                break;
+            }
+            extra_alloc[idx] = extra_alloc[idx].saturating_add(1);
+            remain -= 1;
+        }
+
+        for (idx, job) in jobs.iter_mut().enumerate() {
+            job.threads = job.threads.saturating_add(extra_alloc[idx]).max(1);
+        }
+    }
+
+    let queue: Arc<Mutex<VecDeque<GroupJob>>> = Arc::new(Mutex::new(
+        jobs.into_iter().collect::<VecDeque<_>>(),
     ));
     let results: Arc<Mutex<Vec<Option<(String, u64, u64, u64)>>>> =
         Arc::new(Mutex::new(vec![None; paths.len()]));
@@ -382,18 +476,19 @@ fn scan_multi_dir_info(
                     }
                 };
 
-                let Some((root, indexes)) = next_job else {
+                let Some(job) = next_job else {
                     return;
                 };
 
-                let targets = indexes
+                let targets = job
+                    .indexes
                     .iter()
                     .map(|&idx| input_paths[idx].clone())
                     .collect::<Vec<_>>();
 
-                match scan_group_paths_impl(&root, &targets, per_group_threads) {
+                match scan_group_paths_impl(&job.root, &targets, job.threads) {
                     Ok(group_results) => {
-                        if group_results.len() != indexes.len() {
+                        if group_results.len() != job.indexes.len() {
                             if let Ok(mut err) = errors.lock() {
                                 err.push("scan result length mismatch".to_string());
                             }
@@ -401,7 +496,7 @@ fn scan_multi_dir_info(
                         }
 
                         if let Ok(mut output) = results.lock() {
-                            for (local_pos, global_idx) in indexes.iter().enumerate() {
+                            for (local_pos, global_idx) in job.indexes.iter().enumerate() {
                                 let (kb, skipped_perm, skipped_cross_dev) = group_results[local_pos];
                                 let path = original_paths[*global_idx].clone();
                                 output[*global_idx] = Some((
