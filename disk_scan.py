@@ -116,6 +116,9 @@ def du_kb(path: str, workers: int | None = None) -> tuple[int, int, int]:
 
 def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> list[dict]:
     projects: dict[str, dict] = {}
+    project_width = max(7, *(len(project) for project, _ in block.rows)) if block.rows else 7
+    folder_width = max(7, *(len(folder) for _, folder in block.rows)) if block.rows else 7
+    size_width = 10
 
     for project, folder in block.rows:
         if not os.path.isdir(folder):
@@ -140,11 +143,16 @@ def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> lis
 
         used, _, _ = du_kb(folder, workers)
         used_human = _format_kb(used)
+        size_width = max(size_width, len(used_human))
         if used > MIN_PARTITION_KB:
             project_data["Partition"].append(
                 {"Folder": folder, "Used": str(used), "Hard_disk": disk_name}
             )
-        print(f"-Project: {project:<12} Folder: {folder:<40} Size: {used_human}")
+        print(
+            f"Project: {project:<{project_width}} | "
+            f"Folder: {folder:<{folder_width}} | "
+            f"Size: {used_human:>{size_width}}"
+        )
 
     output = []
     for project_data in projects.values():
