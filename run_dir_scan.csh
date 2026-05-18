@@ -4,7 +4,7 @@
 #
 # config.list: list of python3 paths (one path per line).
 # The script picks the first existing path in config.list and runs:
-#   bs -os RHEL8 -M 10000 <python_path> disk_scan.py --workers <N>
+#   bs -os RHEL8 -M 20000 <python_path> disk_scan.py --workers <N>
 
 set workers = 64
 
@@ -61,6 +61,6 @@ if ("$pybin" == "") then
   exit 3
 endif
 
-echo "Running: bs -os RHEL8 -M 10000 $pybin $scan_script --workers $workers"
-bs -os RHEL8 -M 10000 "$pybin" "$scan_script" --workers "$workers"
+echo "Running: bs -os RHEL8 -M 20000 $pybin $scan_script --workers $workers"
+bs -os RHEL8 -M 20000 "$pybin" "$scan_script" --workers "$workers"
 exit $status
