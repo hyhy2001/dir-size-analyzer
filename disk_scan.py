@@ -174,10 +174,12 @@ def parse_duration(seconds: int) -> str:
 
 
 def _format_kb(kb: int) -> str:
+    if kb >= 1024 * 1024 * 1024:
+        return f"{kb / (1024 * 1024 * 1024):.2f} TB"
     if kb >= 1024 * 1024:
-        return f"{kb / (1024 * 1024):.2f} TB"
+        return f"{kb / (1024 * 1024):.2f} GB"
     if kb >= 1024:
-        return f"{kb / 1024:.2f} GB"
+        return f"{kb / 1024:.2f} MB"
     return f"{kb} KB"
 
 
