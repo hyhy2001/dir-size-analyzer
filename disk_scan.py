@@ -114,17 +114,37 @@ def du_kb(path: str, workers: int | None = None) -> tuple[int, int, int]:
     )
 
 
+def du_multi_kb(paths: list[str], workers: int | None = None) -> list[tuple[int, int, int]]:
+    if not paths:
+        return []
+
+    if fast_scanner is not None and hasattr(fast_scanner, "scan_multi_dir_info"):
+        scans = fast_scanner.scan_multi_dir_info(paths, workers)
+        return [(int(kb), int(skipped_perm), int(skipped_cross_dev)) for _, kb, skipped_perm, skipped_cross_dev in scans]
+
+    return [du_kb(path, workers) for path in paths]
+
+
 def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> list[dict]:
     projects: dict[str, dict] = {}
-    project_width = max(7, *(len(project) for project, _ in block.rows)) if block.rows else 7
-    folder_width = max(7, *(len(folder) for _, folder in block.rows)) if block.rows else 7
-    size_width = 10
+    valid_rows: list[tuple[str, str]] = []
 
     for project, folder in block.rows:
         if not os.path.isdir(folder):
             print(f"\t\tFolder not exist {folder}")
             continue
+        valid_rows.append((project, folder))
 
+    if not valid_rows:
+        return []
+
+    project_width = max(7, *(len(project) for project, _ in valid_rows))
+    folder_width = max(7, *(len(folder) for _, folder in valid_rows))
+    scan_results = du_multi_kb([folder for _, folder in valid_rows], workers)
+    used_labels = [_format_kb(used) for used, _, _ in scan_results]
+    size_width = max(10, *(len(label) for label in used_labels))
+
+    for index, (project, folder) in enumerate(valid_rows):
         project_data = projects.setdefault(
             project,
             {"Project": project, "Date": str(timestamp), "Hard_disk": {}, "Partition": []},
@@ -141,9 +161,8 @@ def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> lis
             },
         )
 
-        used, _, _ = du_kb(folder, workers)
-        used_human = _format_kb(used)
-        size_width = max(size_width, len(used_human))
+        used, _, _ = scan_results[index]
+        used_human = used_labels[index]
         if used > MIN_PARTITION_KB:
             project_data["Partition"].append(
                 {"Folder": folder, "Used": str(used), "Hard_disk": disk_name}
