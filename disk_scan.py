@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 MIN_PARTITION_KB = 500_000
@@ -114,12 +114,19 @@ def du_kb(path: str, workers: int | None = None) -> tuple[int, int, int]:
     )
 
 
-def du_multi_kb(paths: list[str], workers: int | None = None) -> list[tuple[int, int, int]]:
+def du_multi_kb(
+    paths: list[str],
+    workers: int | None = None,
+    on_result: Callable[[int, str, int, int, int], None] | None = None,
+) -> list[tuple[int, int, int]]:
     if not paths:
         return []
 
     if fast_scanner is not None and hasattr(fast_scanner, "scan_multi_dir_info"):
-        scans = fast_scanner.scan_multi_dir_info(paths, workers)
+        if on_result is not None:
+            scans = fast_scanner.scan_multi_dir_info(paths, workers, on_result)
+        else:
+            scans = fast_scanner.scan_multi_dir_info(paths, workers)
         return [(int(kb), int(skipped_perm), int(skipped_cross_dev)) for _, kb, skipped_perm, skipped_cross_dev in scans]
 
     return [du_kb(path, workers) for path in paths]
@@ -140,9 +147,39 @@ def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> lis
 
     project_width = max(7, *(len(project) for project, _ in valid_rows))
     folder_width = max(7, *(len(folder) for _, folder in valid_rows))
-    scan_results = du_multi_kb([folder for _, folder in valid_rows], workers)
-    used_labels = [_format_kb(used) for used, _, _ in scan_results]
-    size_width = max(10, *(len(label) for label in used_labels))
+    size_width = 10
+    live_results: list[tuple[int, int, int] | None] = [None] * len(valid_rows)
+
+    def _on_scan_done(index: int, _path: str, kb: int, skipped_perm: int, skipped_cross_dev: int) -> None:
+        used = int(kb)
+        live_results[index] = (used, int(skipped_perm), int(skipped_cross_dev))
+        project, folder = valid_rows[index]
+        print(
+            f"Project: {project:<{project_width}} | "
+            f"Folder: {folder:<{folder_width}} | "
+            f"Size: {_format_kb(used):>{size_width}}"
+        )
+
+    fallback_results = du_multi_kb(
+        [folder for _, folder in valid_rows],
+        workers,
+        on_result=_on_scan_done,
+    )
+
+    scan_results: list[tuple[int, int, int]] = []
+    for index, row in enumerate(live_results):
+        if row is not None:
+            scan_results.append(row)
+            continue
+
+        used, skipped_perm, skipped_cross_dev = fallback_results[index]
+        scan_results.append((used, skipped_perm, skipped_cross_dev))
+        project, folder = valid_rows[index]
+        print(
+            f"Project: {project:<{project_width}} | "
+            f"Folder: {folder:<{folder_width}} | "
+            f"Size: {_format_kb(used):>{size_width}}"
+        )
 
     for index, (project, folder) in enumerate(valid_rows):
         project_data = projects.setdefault(
@@ -162,16 +199,10 @@ def build_payload(block: InputBlock, timestamp: int, workers: int | None) -> lis
         )
 
         used, _, _ = scan_results[index]
-        used_human = used_labels[index]
         if used > MIN_PARTITION_KB:
             project_data["Partition"].append(
                 {"Folder": folder, "Used": str(used), "Hard_disk": disk_name}
             )
-        print(
-            f"Project: {project:<{project_width}} | "
-            f"Folder: {folder:<{folder_width}} | "
-            f"Size: {used_human:>{size_width}}"
-        )
 
     output = []
     for project_data in projects.values():

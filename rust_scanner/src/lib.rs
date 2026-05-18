@@ -301,10 +301,12 @@ fn scan_dir_kb(path: String, max_workers: Option<usize>) -> PyResult<u64> {
     Ok(kb)
 }
 
-#[pyfunction(signature = (paths, max_workers=None))]
+#[pyfunction(signature = (paths, max_workers=None, on_result=None))]
 fn scan_multi_dir_info(
+    py: Python,
     paths: Vec<String>,
     max_workers: Option<usize>,
+    on_result: Option<PyObject>,
 ) -> PyResult<Vec<(String, u64, u64, u64)>> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -357,95 +359,124 @@ fn scan_multi_dir_info(
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let input_paths = Arc::new(input_paths);
     let original_paths = Arc::new(paths);
+    let callback = on_result.map(|cb| Arc::new(cb.into_py(py)));
 
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let queue = queue.clone();
-        let results = results.clone();
-        let errors = errors.clone();
-        let input_paths = input_paths.clone();
-        let original_paths = original_paths.clone();
+    let output = py.allow_threads(move || -> PyResult<Vec<(String, u64, u64, u64)>> {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let queue = queue.clone();
+            let results = results.clone();
+            let errors = errors.clone();
+            let input_paths = input_paths.clone();
+            let original_paths = original_paths.clone();
+            let callback = callback.clone();
 
-        let handle = thread::spawn(move || loop {
-            let next_job = match queue.lock() {
-                Ok(mut guard) => guard.pop_front(),
-                Err(_) => {
-                    if let Ok(mut err) = errors.lock() {
-                        err.push("queue lock poisoned".to_string());
-                    }
-                    return;
-                }
-            };
-
-            let Some((root, indexes)) = next_job else {
-                return;
-            };
-
-            let targets = indexes
-                .iter()
-                .map(|&idx| input_paths[idx].clone())
-                .collect::<Vec<_>>();
-
-            match scan_group_paths_impl(&root, &targets, per_group_threads) {
-                Ok(group_results) => {
-                    if group_results.len() != indexes.len() {
+            let handle = thread::spawn(move || loop {
+                let next_job = match queue.lock() {
+                    Ok(mut guard) => guard.pop_front(),
+                    Err(_) => {
                         if let Ok(mut err) = errors.lock() {
-                            err.push("scan result length mismatch".to_string());
+                            err.push("queue lock poisoned".to_string());
                         }
                         return;
                     }
+                };
 
-                    if let Ok(mut output) = results.lock() {
-                        for (local_pos, global_idx) in indexes.iter().enumerate() {
-                            let (kb, skipped_perm, skipped_cross_dev) = group_results[local_pos];
-                            output[*global_idx] = Some((
-                                original_paths[*global_idx].clone(),
-                                kb,
-                                skipped_perm,
-                                skipped_cross_dev,
-                            ));
+                let Some((root, indexes)) = next_job else {
+                    return;
+                };
+
+                let targets = indexes
+                    .iter()
+                    .map(|&idx| input_paths[idx].clone())
+                    .collect::<Vec<_>>();
+
+                match scan_group_paths_impl(&root, &targets, per_group_threads) {
+                    Ok(group_results) => {
+                        if group_results.len() != indexes.len() {
+                            if let Ok(mut err) = errors.lock() {
+                                err.push("scan result length mismatch".to_string());
+                            }
+                            return;
                         }
-                    } else if let Ok(mut err) = errors.lock() {
-                        err.push("result lock poisoned".to_string());
-                        return;
+
+                        if let Ok(mut output) = results.lock() {
+                            for (local_pos, global_idx) in indexes.iter().enumerate() {
+                                let (kb, skipped_perm, skipped_cross_dev) = group_results[local_pos];
+                                let path = original_paths[*global_idx].clone();
+                                output[*global_idx] = Some((
+                                    path.clone(),
+                                    kb,
+                                    skipped_perm,
+                                    skipped_cross_dev,
+                                ));
+
+                                if let Some(cb) = &callback {
+                                    let cb = cb.clone();
+                                    let callback_result = Python::with_gil(|py| {
+                                        cb.call1(
+                                            py,
+                                            (
+                                                *global_idx,
+                                                path,
+                                                kb,
+                                                skipped_perm,
+                                                skipped_cross_dev,
+                                            ),
+                                        )
+                                    });
+                                    if let Err(err_obj) = callback_result {
+                                        if let Ok(mut err) = errors.lock() {
+                                            err.push(err_obj.to_string());
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                        } else if let Ok(mut err) = errors.lock() {
+                            err.push("result lock poisoned".to_string());
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        if let Ok(mut err) = errors.lock() {
+                            err.push(error.to_string());
+                        }
                     }
                 }
-                Err(error) => {
-                    if let Ok(mut err) = errors.lock() {
-                        err.push(error.to_string());
-                    }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            if handle.join().is_err() {
+                if let Ok(mut err) = errors.lock() {
+                    err.push("worker thread panicked".to_string());
                 }
             }
-        });
+        }
 
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        if handle.join().is_err() {
-            if let Ok(mut err) = errors.lock() {
-                err.push("worker thread panicked".to_string());
+        if let Ok(err) = errors.lock() {
+            if !err.is_empty() {
+                return Err(PyRuntimeError::new_err(err.join("; ")));
             }
         }
-    }
 
-    if let Ok(err) = errors.lock() {
-        if !err.is_empty() {
-            return Err(PyRuntimeError::new_err(err.join("; ")));
-        }
-    }
-
-    let output = results
-        .lock()
-        .map_err(|_| PyRuntimeError::new_err("result lock poisoned"))?
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            item.clone().ok_or_else(|| {
-                PyRuntimeError::new_err(format!("Missing scan result at index {index}"))
+        let output = results
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("result lock poisoned"))?
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.clone().ok_or_else(|| {
+                    PyRuntimeError::new_err(format!("Missing scan result at index {index}"))
+                })
             })
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+            .collect::<PyResult<Vec<_>>>()?;
+
+        Ok(output)
+    })?;
 
     Ok(output)
 }
