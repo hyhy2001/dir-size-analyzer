@@ -8,6 +8,12 @@
 
 set workers = 64
 
+set script_dir = "$0:h"
+if ("$script_dir" == "") set script_dir = "."
+set script_dir = `cd "$script_dir" && pwd`
+set config_file = "$script_dir/config.list"
+set scan_script = "$script_dir/disk_scan.py"
+
 set i = 1
 while ($i <= $#argv)
   set arg = "$argv[$i]"
@@ -32,13 +38,18 @@ while ($i <= $#argv)
   @ i++
 end
 
-if (! -f "config.list") then
-  echo "config.list not found"
+if (! -f "$config_file") then
+  echo "config.list not found: $config_file"
+  exit 2
+endif
+
+if (! -f "$scan_script") then
+  echo "disk_scan.py not found: $scan_script"
   exit 2
 endif
 
 set pybin = ""
-foreach p (`awk 'NF && $1 !~ /^#/' config.list`)
+foreach p (`awk 'NF && $1 !~ /^#/' "$config_file"`)
   if (-e "$p") then
     set pybin = "$p"
     break
@@ -50,6 +61,6 @@ if ("$pybin" == "") then
   exit 3
 endif
 
-echo "Running: bs -os RHEL8 -M 10000 $pybin disk_scan.py --workers $workers"
-bs -os RHEL8 -M 10000 "$pybin" disk_scan.py --workers "$workers"
+echo "Running: bs -os RHEL8 -M 10000 $pybin $scan_script --workers $workers"
+bs -os RHEL8 -M 10000 "$pybin" "$scan_script" --workers "$workers"
 exit $status
